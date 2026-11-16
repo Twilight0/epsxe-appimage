@@ -1,0 +1,49 @@
+/* ePSXe 2.0.5 readability fixes.
+ *
+ * The game list is a GtkTreeView ("gamelist_treeview"). ePSXe paints its
+ * rows on a light background, but the *selected* row takes the selection
+ * colour of the desktop theme. Under a dark theme that is a dark grey
+ * (rgb 60,60,60) while the row text stays dark (rgb 15,15,15) - a
+ * contrast of about 1.8:1, which is unreadable.
+ *
+ * Repaint the selected row like a light-theme selection: a pale blue
+ * background with dark text, so it stays clearly selected and readable in
+ * both light and dark desktop themes.
+ */
+
+#gamelist_treeview {
+  background-color: #f2f2f2;
+  color: #1a1a1a;
+}
+
+#gamelist_treeview:selected,
+#gamelist_treeview:selected:focus {
+  background-color: #cfe0f5;
+  color: #101010;
+}
+
+#gamelist_treeview:hover {
+  background-color: #e8eef7;
+}
+
+/* The same problem in the cheat code lists. */
+#cheats_tree_enabled,
+#cheats_tree_available {
+  background-color: #f2f2f2;
+  color: #1a1a1a;
+}
+
+#cheats_tree_enabled:selected,
+#cheats_tree_enabled:selected:focus,
+#cheats_tree_available:selected,
+#cheats_tree_available:selected:focus {
+  background-color: #cfe0f5;
+  color: #101010;
+}
+
+/* Labels in the file chooser (the "game directory" dialog) that inherit a
+ * dim foreground from a dark theme. */
+.file-chooser label,
+.file-chooser .sidebar label {
+  color: #1a1a1a;
+}

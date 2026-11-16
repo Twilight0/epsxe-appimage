@@ -34,6 +34,7 @@ else
 fi
 
 APPDIR="$WORK/ePSXe.AppDir"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EPSXE_VER=2.0.5
 PLGN_VER=1.9.95
 UBUNTU_POOL="http://archive.ubuntu.com/ubuntu/pool"
@@ -370,6 +371,7 @@ ls -1 "$APPDIR/usr/plugins" 2>/dev/null || echo "  (none)"
 # --------------------------------------------------------------- AppRun ----
 log "Writing AppRun"
 mkdir -p "$APPDIR/usr/share/epsxe"
+cp "$SCRIPT_DIR/epsxe.css" "$APPDIR/usr/share/epsxe/epsxe.css"
 cat > "$APPDIR/usr/share/epsxe/config.example" <<'CFG'
 # ePSXe settings.
 #
@@ -465,6 +467,15 @@ if [ -n "${EPSXE_GTK_THEME:-}" ]; then
 fi
 
 if [ -n "${EPSXE_GTK_CSS:-}" ] && [ -f "$EPSXE_GTK_CSS" ]; then
+  _css="$EPSXE_GTK_CSS"
+elif [ "${EPSXE_GTK_CSS:-}" = "none" ]; then
+  _css=""
+else
+  # Our own readability fixes, applied on top of the desktop's user.css.
+  _css="${HERE}/usr/share/epsxe/epsxe.css"
+fi
+
+if [ -n "${_css:-}" ] && [ -f "$_css" ]; then
   # A private XDG_CONFIG_HOME keeps the override scoped to ePSXe: the
   # desktop's own GTK settings are copied in, ours are appended.
   _cfg="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -473,8 +484,8 @@ if [ -n "${EPSXE_GTK_CSS:-}" ] && [ -f "$EPSXE_GTK_CSS" ]; then
   for _f in settings.ini user.css gtk.css; do
     [ -f "$_cfg/gtk-3.0/$_f" ] && cp "$_cfg/gtk-3.0/$_f" "$_priv/gtk-3.0/" || true
   done
-  cat "$EPSXE_GTK_CSS" >> "$_priv/gtk-3.0/user.css" 2>/dev/null || \
-    cp "$EPSXE_GTK_CSS" "$_priv/gtk-3.0/user.css"
+  cat "$_css" >> "$_priv/gtk-3.0/user.css" 2>/dev/null || \
+    cp "$_css" "$_priv/gtk-3.0/user.css"
   export XDG_CONFIG_HOME="$_priv"
 fi
 
