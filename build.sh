@@ -1,21 +1,37 @@
 #!/usr/bin/env bash
 # Build a self-contained ePSXe 2.0.5 AppImage for x86_64.
 #
-# ePSXe 2.0.5 is a closed-source 64-bit Linux binary that expects a
-# pre-2019 runtime (ncurses 5, OpenSSL 1.0, libcurl with CURL_OPENSSL_3,
-# SDL 1.2). None of those exist on a modern distro, so we bundle them.
+# ePSXe 2.0.5 is a closed-source 64-bit Linux binary from 2010 that expects
+# a pre-2019 runtime:
 #
-# The upstream PSEmu Pro plugin set (Pete Bernert's PEOpS/XGL2/SoftX/OSS
-# and padJoy) is 32-bit i386 only and cannot be loaded by the 64-bit
-# binary, so the 64-bit plugins are built from the PCSX-Reloaded 1.9.95
-# sources (the same source the Arch AUR 'epsxe' package uses).
+#   * libncurses.so.5 / libtinfo.so.5 with the NCURSES_TINFO_5.0.19991023
+#     symbol version node,
+#   * libcrypto.so.1.0.0 / libssl.so.1.0.0 (OpenSSL 1.0),
+#   * libcurl.so.4 exporting CURL_OPENSSL_3 (not the CURL_OPENSSL_4 that
+#     current libcurl provides),
+#   * SDL 1.2.
+#
+# None of those exist on a current distro, so we bundle them.
+#
+# The upstream PSEmu Pro plugin set (Pete Bernert's PEOpS SoftX / MesaGL /
+# OSS, Pete's XGL2, and padJoy) is published as 32-bit i386 binaries only and
+# cannot be loaded by the 64-bit binary, so the 64-bit plugins are built from
+# the PCSX-Reloaded 1.9.95 sources (the same source the Arch AUR 'epsxe'
+# package uses).
 #
 # Usage: build.sh <output-dir>
+#   Env: KEEP_WORK=1   keep the temporary work directory for inspection
 set -euo pipefail
 
 OUT_DIR="${1:?usage: build.sh <output-dir>}"
+mkdir -p "$OUT_DIR"
+
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+if [ "${KEEP_WORK:-0}" = "1" ]; then
+  trap 'echo "work dir kept: $WORK"' EXIT
+else
+  trap 'rm -rf "$WORK"' EXIT
+fi
 
 APPDIR="$WORK/ePSXe.AppDir"
 EPSXE_VER=2.0.5
@@ -23,14 +39,29 @@ PLGN_VER=1.9.95
 UBUNTU_POOL="http://archive.ubuntu.com/ubuntu/pool"
 
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib" "$APPDIR/usr/plugins" \
-         "$APPDIR/usr/config" "$APPDIR/usr/share/icons/hicolor/256x256/apps"
+         "$APPDIR/usr/config" "$APPDIR/usr/share/icons/hicolor/256x256/apps" \
+         "$APPDIR/usr/share/applications" "$APPDIR/usr/share/doc/epsxe"
+
+# Download cache: re-runs reuse already fetched archives.
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/epsxe-appimage-build"
+mkdir -p "$CACHE"
+
+# fetch <url> <dest> — cached, with retries on transient network errors.
+fetch() {
+  local url="$1" dest="$2" name cached
+  name="$(printf '%s' "$url" | md5sum | cut -d' ' -f1)"
+  cached="$CACHE/$name"
+  if [ ! -s "$cached" ]; then
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o "$cached" "$url"
+  fi
+  cp "$cached" "$dest"
+}
 
 log() { printf '\n=== %s\n' "$*"; }
 
 # ---------------------------------------------------------------- ePSXe ---
 log "Fetching ePSXe ${EPSXE_VER} (official x86_64 build)"
-curl -fsSL --retry 3 -o "$WORK/epsxe.zip" \
-  "https://www.epsxe.com/files/ePSXe${EPSXE_VER//./}linux_x64.zip"
+fetch "https://www.epsxe.com/files/ePSXe${EPSXE_VER//./}linux_x64.zip" "$WORK/epsxe.zip"
 python3 - "$WORK/epsxe.zip" "$APPDIR" <<'PY'
 import sys, zipfile, os
 z = zipfile.ZipFile(sys.argv[1])
@@ -43,34 +74,64 @@ for name in z.namelist():
     elif name.startswith('docs/') and name.endswith('.txt'):
         z.extract(name, out)
 PY
-mkdir -p "$APPDIR/usr/share/doc/epsxe"
 mv "$APPDIR/docs/"*.txt "$APPDIR/usr/share/doc/epsxe/" 2>/dev/null || true
 rm -rf "$APPDIR/docs"
 
 # --------------------------------------------------------------- shaders ---
 log "Fetching shaders"
-if curl -fsSL --retry 2 -o "$WORK/shaders.zip" "https://www.epsxe.com/files/shaders.zip"; then
+if fetch "https://www.epsxe.com/files/shaders.zip" "$WORK/shaders.zip"; then
   mkdir -p "$WORK/shaders" && unzip -q -o "$WORK/shaders.zip" -d "$WORK/shaders"
+  mkdir -p "$APPDIR/usr/shaders"
   if [ -d "$WORK/shaders/shaders" ]; then
-    cp -r "$WORK/shaders/shaders/." "$APPDIR/usr/config/"
+    cp -r "$WORK/shaders/shaders/." "$APPDIR/usr/shaders/"
   else
-    cp -r "$WORK/shaders/." "$APPDIR/usr/config/"
+    cp -r "$WORK/shaders/." "$APPDIR/usr/shaders/"
   fi
 fi
 
-# ------------------------------------------------- legacy runtime libs ----
-# Ubuntu 16.04 (xenial) runtime: ncurses 5, OpenSSL 1.0, libcurl 7.47.
-# These carry the exact SONAMEs and symbol versions ePSXe links against
-# (NCURSES_5.0.19991023, CURL_OPENSSL_3, libcrypto.so.1.0.0).
+# --------------------------------------------------------- runtime closure --
+# The modern desktop stack (GTK3, SDL, GL, X11, ALSA) comes from the runtime
+# that the upstream ePSXe AppImage already bundles for exactly this binary
+# (Ubuntu 18.04). Two things in it are wrong for a current distro and are
+# replaced below:
+#
+#   * its libncurses/libtinfo .so.5 carry no NCURSES_TINFO_5.0.19991023
+#     version node, which the binary requires,
+#   * its libssl.so.1.1 and libunistring.so.2 (needed by its libssh2,
+#     libldap_r and libpsl) were never bundled at all.
+log "Collecting the runtime library set"
+
+fetch "https://github.com/amirzaim/epsxe-appimage/releases/download/epsxe/ePSXe_PS1_Emulator-x86_64.AppImage" \
+      "$WORK/upstream.AppImage"
+mkdir -p "$WORK/upstream"
+(cd "$WORK/upstream" && chmod +x "$WORK/upstream.AppImage" && "$WORK/upstream.AppImage" --appimage-extract >/dev/null 2>&1) || true
+
+UP_LIB="$WORK/upstream/squashfs-root/usr/lib/x86_64-linux-gnu"
+if [ -d "$UP_LIB" ]; then
+  for so in "$UP_LIB"/*.so*; do
+    [ -e "$so" ] || continue
+    base="$(basename "$so")"
+    case "$base" in
+      libncurses.so.5*|libtinfo.so.5*|libtic.so.5*|libform.so.5*|libmenu.so.5*|libpanel.so.5*) continue ;;
+      # Wayland: the upstream bundle's 18.04 libwayland-client is older than
+      # the host's libwayland-cursor, which then fails on wl_proxy_marshal_flags.
+      # Mixing the two breaks; take the host's consistent set instead.
+      libwayland-*) continue ;;
+      libxkbcommon.so.0) continue ;;
+    esac
+    cp -aL "$so" "$APPDIR/usr/lib/" 2>/dev/null || true
+  done
+fi
+
 log "Fetching legacy runtime libraries"
 mkdir -p "$WORK/debs"
 for u in \
-  "main/c/curl/libcurl3_7.47.0-1ubuntu2.19_amd64.deb" \
-  "main/o/openssl/libssl1.0.0_1.0.2g-1ubuntu4.20_amd64.deb" \
   "main/n/ncurses/libncurses5_6.0+20160213-1ubuntu1_amd64.deb" \
-  "main/n/ncurses/libtinfo5_6.0+20160213-1ubuntu1_amd64.deb" ; do
-  f="$WORK/debs/$(basename "$u")"
-  curl -fsSL --retry 3 -o "$f" "$UBUNTU_POOL/$u"
+  "main/n/ncurses/libtinfo5_6.0+20160213-1ubuntu1_amd64.deb" \
+  "main/o/openssl/libssl1.0.0_1.0.2g-1ubuntu4.20_amd64.deb" \
+  "main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.24_amd64.deb" \
+  "main/libu/libunistring/libunistring2_0.9.10-2_amd64.deb" ; do
+  fetch "$UBUNTU_POOL/$u" "$WORK/debs/$(basename "$u")"
 done
 
 mkdir -p "$WORK/debex"
@@ -78,34 +139,18 @@ for d in "$WORK"/debs/*.deb; do
   ar p "$d" data.tar.xz | tar -xJ -C "$WORK/debex"
 done
 
-# Collect the shared objects we need (plus their symlinks) into usr/lib.
-collect() {
-  local src="$1" name="$2"
-  [ -e "$WORK/debex$src" ] || return 1
-  cp -aL "$WORK/debex$src" "$APPDIR/usr/lib/$name" 2>/dev/null || \
-    cp -a "$WORK/debex$src" "$APPDIR/usr/lib/$name"
-}
-for base in lib usr/lib; do
-  for f in "$WORK/debex/$base/x86_64-linux-gnu"; do
-    [ -d "$f" ] || continue
-    for so in "$f"/libncurses.so.5* "$f"/libtinfo.so.5* "$f"/libtic.so.5* \
-              "$f"/libcurl.so.4* "$f"/libcurl.so.3 "$f"/libssl.so.1.0.0* \
-              "$f"/libcrypto.so.1.0.0*; do
-      [ -e "$so" ] || continue
-      cp -a "$so" "$APPDIR/usr/lib/" 2>/dev/null || true
-    done
+for dir in "$WORK/debex/lib/x86_64-linux-gnu" "$WORK/debex/usr/lib/x86_64-linux-gnu"; do
+  [ -d "$dir" ] || continue
+  for so in "$dir"/libncurses.so.5* "$dir"/libtinfo.so.5* "$dir"/libtic.so.5* \
+            "$dir"/libssl.so.1.0.0* "$dir"/libcrypto.so.1.0.0* \
+            "$dir"/libssl.so.1.1* "$dir"/libcrypto.so.1.1* \
+            "$dir"/libunistring.so.2*; do
+    [ -e "$so" ] || continue
+    cp -aL "$so" "$APPDIR/usr/lib/" 2>/dev/null || true
   done
 done
 
-# Fix up sonames/symlinks so the loader finds them.
-cd "$APPDIR/usr/lib"
-ln -sf libncurses.so.5.9 libncurses.so.5
-ln -sf libtinfo.so.5.9 libtinfo.so.5
-ln -sf libcrypto.so.1.0.0 libcrypto.so.1.0.0
-ln -sf libssl.so.1.0.0 libssl.so.1.0.0
-rm -f libcurl.so.3
-[ -e libcurl.so.4.4.0 ] && ln -sf libcurl.so.4.4.0 libcurl.so.4
-cd "$WORK"
+echo "  bundled $(find "$APPDIR/usr/lib" -type f | wc -l) libraries"
 
 # ---------------------------------------------------------- 64-bit plugins --
 log "Building 64-bit plugins from PCSX-Reloaded ${PLGN_VER}"
@@ -113,32 +158,46 @@ git clone -q --depth 1 --branch "$PLGN_VER" \
   https://github.com/frealgagu/PCSX-Reloaded.git "$WORK/pcsxr"
 cd "$WORK/pcsxr/pcsxr"
 
-# Patches from the Arch AUR 'epsxe' package (modern toolchain fixes).
-for p in Makefile.patch configure_ac.patch; do
-  curl -fsSL -o "$WORK/$p" "https://aur.archlinux.org/cgit/aur.git/plain/$p?h=epsxe"
-done
-patch -p0 < "$WORK/Makefile.patch"
-patch -p0 < "$WORK/configure_ac.patch"
+# Build only the Linux-relevant plugins. dfxvideo is a DirectX plugin and
+# bladesio1 is the Windows SIO1 interface: neither is usable here, and both
+# fail to compile against a modern toolchain.
+cat > Makefile.am <<'EOF'
+SUBDIRS = plugins/dfinput
+SUBDIRS += plugins/dfsound
+SUBDIRS += plugins/dfcdrom
+SUBDIRS += plugins/dfnet
+SUBDIRS += $(PEOPSXGL)
 
-cd "$WORK/pcsxr"
-for p in pcsxr-fix-undefined-operations.patch peopsxgl_gpu_c.patch dfxvideo_cfg_c.patch; do
-  curl -fsSL -o "$WORK/$p" "https://aur.archlinux.org/cgit/aur.git/plain/$p?h=epsxe"
-  patch -Np1 -i "$WORK/$p" || echo "warning: $p did not apply cleanly"
-done
+DIST_SUBDIRS = $(SUBDIRS) plugins/bladesio1 plugins/peopsxgl
 
-cd "$WORK/pcsxr/pcsxr"
+EXTRA_DIST = AUTHORS COPYING INSTALL NEWS README ChangeLog ChangeLog.df strip_fPIC.sh
+EOF
+
+python3 - <<'PY'
+p = 'configure.ac'
+s = open(p).read()
+for blk in ('plugins/dfxvideo/Makefile', 'plugins/bladesio1/Makefile'):
+    s = s.replace(blk + '\n', '')
+open(p, 'w').write(s)
+PY
+
 mkdir -p include
 
-# Implicit-function-declaration fixes for modern GCC.
+# Toolchain fixes for modern GCC.
 sed -ri 's|(#include "pad.h")|\1\n#include <sys/wait.h>|' plugins/dfinput/pad.c
 sed -ri 's|(#include "stdafx.h")|\1\n#include <sys/wait.h>|' plugins/dfsound/cfg.c
 sed -ri 's|(#include "cdr.h")|\1\n#include <sys/wait.h>|' plugins/dfcdrom/cdr.c
-sed -ri 's|(#include "sio1.h")|\1\n#include <sys/wait.h>|' plugins/bladesio1/sio1.c
-sed -ri 's|(#include "sio1.h")|\1\n#include <unistd.h>|' plugins/bladesio1/sio1.c
+sed -ri 's|(#include "stdafx.h")|\1\n#include <sys/wait.h>|' plugins/peopsxgl/gpu.c
+sed -ri 's|\*disp=\(unsigned long \*\)display;|*disp=(unsigned long)display;|' plugins/peopsxgl/gpu.c
+# Old-style (unprototyped) declaration clashes with the real definition.
+sed -i 's|^int OpenCdHandle();|int OpenCdHandle(const char *dev);|' plugins/dfcdrom/cdr.h
 # ePSXe looks in ~/.epsxe, PCSX-Reloaded in ~/.pcsxr.
 sed -i 's|\.pcsxr|.epsxe|g' gui/Linux.h
 sed -i 's|/games/psemu/||g' plugins/peopsxgl/Makefile.am
 sed -i 's|/psemu/||g' plugins/peopsxgl/Makefile.am
+# The plugin config GUI lives next to the plugin itself.
+sed -i 's|%s/\.epsxe/plugins/cfg/cfgpeopsxgl|%s/.epsxe/plugins/cfgpeopsxgl|' \
+  plugins/peopsxgl/gpu.c
 
 export CC=gcc CXX=g++
 export CFLAGS="-fcommon -O2 -Wno-error"
@@ -156,20 +215,30 @@ intltoolize --force >/dev/null 2>&1
   --bindir="$APPDIR/usr/plugins" \
   --datarootdir="$APPDIR/usr/config" >/dev/null
 
-make -j"$(nproc)" >/dev/null 2>&1 || make >"$WORK/make.log" 2>&1 || {
-  echo "plugin build failed:"; tail -30 "$WORK/make.log"; exit 1; }
+make -j"$(nproc)" >"$WORK/make.log" 2>&1 || {
+  echo "plugin build failed:"; grep -E "error:" "$WORK/make.log" | head -20; tail -20 "$WORK/make.log"; exit 1; }
 
-cd "$APPDIR/usr/plugins"
-for so in *.so; do
-  [ -e "$so" ] || continue
-  mv "$so" "$APPDIR/usr/plugins/" 2>/dev/null || true
+# Plugins are linked into the build tree (libtool .libs/), not installed.
+for pdir in "$WORK/pcsxr/pcsxr/plugins"/*/; do
+  pname="$(basename "$pdir")"
+  [ -d "$pdir/.libs" ] || continue
+  for so in "$pdir/.libs"/*.so; do
+    [ -e "$so" ] || continue
+    cp -a "$so" "$APPDIR/usr/plugins/"
+  done
+  # Config helper (e.g. cfgpeopsxgl, cfgDFInput) goes next to the plugin.
+  for cfg in "$pdir"/cfg*; do
+    [ -f "$cfg" ] && [ -x "$cfg" ] || continue
+    case "$cfg" in *.c|*.h|*.la|*.o) continue ;; esac
+    cp -a "$cfg" "$APPDIR/usr/plugins/"
+  done
+  # .ui definitions used by the config GUIs.
+  if [ -d "$pdir/gpucfg" ]; then
+    cp -a "$pdir/gpucfg/." "$APPDIR/usr/config/" 2>/dev/null || true
+  fi
 done
-# Plugin .so files are named like libgpuPeopsXGL.so.1.0.0 etc.
-cp -a "$APPDIR/usr/plugins"/*.so* "$APPDIR/usr/plugins/" 2>/dev/null || true
 find "$APPDIR/usr/plugins" -name '*.la' -delete
 find "$APPDIR/usr/plugins" -type d -empty -delete
-
-# Configs produced by the plugin builds.
 find "$WORK/pcsxr" -name '*.cfg' -exec cp -a {} "$APPDIR/usr/config/" \; 2>/dev/null || true
 
 echo
@@ -191,13 +260,16 @@ if [ ! -d "$HOME/.epsxe/plugins" ]; then
   mkdir -p "$HOME/.epsxe"
   ln -sfn "${HERE}/usr/plugins" "$HOME/.epsxe/plugins"
   ln -sfn "${HERE}/usr/config"  "$HOME/.epsxe/config"
+  # ePSXe looks for shaders in ~/.epsxe/shaders.
+  [ -d "${HERE}/usr/shaders" ] && ln -sfn "${HERE}/usr/shaders" "$HOME/.epsxe/shaders"
 fi
 
 exec "${HERE}/usr/bin/epsxe_x64" "$@"
 APPRUN
 chmod +x "$APPDIR/AppRun"
 
-# Desktop entry + icon.
+# Desktop entry + icon. appimagetool wants both in the AppDir root; they are
+# also kept in the standard usr/ locations.
 cat > "$APPDIR/epsxe.desktop" <<'DE'
 [Desktop Entry]
 Type=Application
@@ -209,26 +281,18 @@ Terminal=false
 Categories=Game;Emulator;
 Keywords=PS1;PSX;ePSXe;PlayStation 1;
 DE
-mv "$APPDIR/epsxe.desktop" "$APPDIR/usr/share/applications/epsxe.desktop" 2>/dev/null || {
-  mkdir -p "$APPDIR/usr/share/applications"
-  mv "$APPDIR/epsxe.desktop" "$APPDIR/usr/share/applications/epsxe.desktop"
-}
+cp "$APPDIR/epsxe.desktop" "$APPDIR/usr/share/applications/epsxe.desktop"
 
-# Icon: reuse the upstream PNG from the AppImage the package used before.
-if [ ! -e "$APPDIR/usr/share/icons/hicolor/256x256/apps/epsxe.png" ]; then
-  curl -fsSL --retry 2 -o "$WORK/icon.png" \
-    "https://github.com/amirzaim/epsxe-appimage/releases/download/epsxe/ePSXe_PS1_Emulator-x86_64.AppImage" || true
-  if [ -s "$WORK/icon.png" ]; then
-    (cd "$WORK" && chmod +x icon.png && ./icon.png --appimage-extract >/dev/null 2>&1) || true
-    if [ -f "$WORK/squashfs-root/epsxe.png" ]; then
-      convert "$WORK/squashfs-root/epsxe.png" -background none -resize 256x256 \
-        -gravity center -extent 256x256 \
-        "$APPDIR/usr/share/icons/hicolor/256x256/apps/epsxe.png" 2>/dev/null || \
-        cp "$WORK/squashfs-root/epsxe.png" \
-           "$APPDIR/usr/share/icons/hicolor/256x256/apps/epsxe.png"
-    fi
-  fi
+# Icon: reuse the upstream PNG, scaled to a regular 256x256.
+if [ -f "$WORK/upstream/squashfs-root/epsxe.png" ]; then
+  convert "$WORK/upstream/squashfs-root/epsxe.png" -background none -resize 256x256 \
+    -gravity center -extent 256x256 \
+    "$APPDIR/usr/share/icons/hicolor/256x256/apps/epsxe.png" 2>/dev/null || \
+    cp "$WORK/upstream/squashfs-root/epsxe.png" \
+       "$APPDIR/usr/share/icons/hicolor/256x256/apps/epsxe.png"
 fi
+[ -e "$APPDIR/usr/share/icons/hicolor/256x256/apps/epsxe.png" ] && \
+  cp "$APPDIR/usr/share/icons/hicolor/256x256/apps/epsxe.png" "$APPDIR/epsxe.png"
 
 # ------------------------------------------------------------- AppImage ----
 log "Running appimagetool"
