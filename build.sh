@@ -438,17 +438,73 @@ if [ -z "${SDL_VIDEODRIVER:-}" ] && [ -n "${DISPLAY:-}" ]; then
   export SDL_VIDEODRIVER=x11
 fi
 
-if [ ! -d "$HOME/.epsxe/plugins" ] || [ -L "$HOME/.epsxe/plugins" ]; then
+# --- ~/.epsxe seeding --------------------------------------------------
+# ePSXe resolves plugins, configs, cheats and shaders relative to
+# $HOME/.epsxe. Seed them on first run.
+#
+# The check is "is the content actually there", not "does the directory
+# exist": a previous run could have left an empty plugins/ directory, and
+# then the plugins would never be copied and ePSXe would silently fall
+# back to its internal GPU core - whose ESC/menu handling does not work.
+#
+# Copy rather than symlink: the AppImage is mounted in a temporary
+# directory that disappears when it exits, so a symlink would dangle
+# afterwards.
+_needs_seed=0
+for d in plugins config shaders cheats; do
+  [ -d "${HERE}/usr/$d" ] || continue
+  # Count recursively: the cheats live in per-region subdirectories.
+  _want=$(find "${HERE}/usr/$d" -type f | wc -l)
+  _have=$(find "$HOME/.epsxe/$d" -type f 2>/dev/null | wc -l)
+  if [ "$_want" -gt 0 ] && [ "$_have" -lt "$_want" ]; then
+    _needs_seed=1
+    echo "epsxe: seeding ~/.epsxe/$d ($_have of $_want files present)"
+  fi
+done
+
+if [ "$_needs_seed" = "1" ]; then
+  echo "epsxe: seeding ~/.epsxe (plugins, config, shaders, cheats)..."
   mkdir -p "$HOME/.epsxe"
-  # Copy rather than symlink: the AppImage is mounted in a temporary
-  # directory that disappears when it exits, so a symlink would dangle
-  # afterwards. The cheats are ~5.5k small files, so this is cheap.
   for d in plugins config shaders cheats; do
     [ -d "${HERE}/usr/$d" ] || continue
     rm -rf "$HOME/.epsxe/$d"
     cp -r "${HERE}/usr/$d" "$HOME/.epsxe/$d"
   done
+  echo "epsxe: done."
 fi
+
+# --- select the bundled plugins -----------------------------------------
+# ePSXe defaults to its internal cores (VideoPlugin = GPUCORE), which have
+# no on-the-fly menu: ESC does nothing, and the only way out is the mouse
+# in the GTK window. The ESC menu lives in the external Pete GPU plugin.
+#
+# ePSXe resolves a plugin as $HOME/.epsxe/plugins/<name>, so point the
+# config at the bundled ones. Names are taken from the files present, so
+# this survives a rebuild.
+#
+# epsxerc only exists after ePSXe has run once, so this runs on every start
+# and rewrites the config each time (it is idempotent).
+_select_plugins() {
+  [ -f "$HOME/.epsxe/epsxerc" ] || return 0
+  _rc="$HOME/.epsxe/epsxerc"
+  for _pair in \
+    "VideoPlugin:libpeopsxgl.so" \
+    "SoundPlugin:libDFSound.so" \
+    "InputPlugin:libDFInput.so" \
+    "Input2Plugin:libDFInput.so" ; do
+    _key="${_pair%%:*}"
+    _val="${_pair#*:}"
+    [ -f "$HOME/.epsxe/plugins/$_val" ] || continue
+    if ! grep -q "^$_key = $_val$" "$_rc"; then
+      if grep -q "^$_key = " "$_rc"; then
+        sed -i "s|^$_key = .*|$_key = $_val|" "$_rc"
+      else
+        printf '%s = %s\n' "$_key" "$_val" >> "$_rc"
+      fi
+      echo "epsxe: using the bundled plugin $_val"
+    fi
+  done
+}
 
 # --- theming -----------------------------------------------------------
 # ePSXe 2.0.5 uses stock GTK3 widgets. Under a dark desktop theme the
@@ -494,25 +550,55 @@ fi
 # close button is ignored. SIGTERM would also kill it mid-write of a
 # memory card, so the quit helper asks politely first and only forces the
 # issue if the emulator ignores the request.
+quit_epsxe() {
+  _pids="$(pgrep -f 'epsxe_x64' || true)"
+  if [ -z "$_pids" ]; then
+    echo "epsxe is not running" >&2
+    return 1
+  fi
+  for _p in $_pids; do kill -TERM "$_p" 2>/dev/null || true; done
+  sleep 2
+  for _p in $(pgrep -f 'epsxe_x64' || true); do kill -KILL "$_p" 2>/dev/null || true; done
+  echo "epsxe closed"
+}
+
 case "${1:-}" in
   --quit)
     shift
-    _pids="$(pgrep -f 'epsxe_x64' || true)"
-    if [ -z "$_pids" ]; then
-      echo "epsxe is not running" >&2
-      exit 1
-    fi
-    for _p in $_pids; do kill -TERM "$_p" 2>/dev/null || true; done
-    sleep 2
-    for _p in $(pgrep -f 'epsxe_x64' || true); do kill -KILL "$_p" 2>/dev/null || true; done
-    echo "epsxe closed"
-    exit 0
+    quit_epsxe
+    exit $?
     ;;
 esac
+
+# ePSXe reads ~/.epsxe/epsxerc at startup and writes it back on exit, so
+# the plugin selection has to happen before the emulator is started. On the
+# very first run the file does not exist yet; ePSXe then creates it with
+# the internal cores, and the next run picks up the bundled plugins.
+_select_plugins
 
 exec "${HERE}/usr/bin/epsxe_x64" "$@"
 APPRUN
 chmod +x "$APPDIR/AppRun"
+# A standalone quit helper, also usable when ePSXe was started from the
+# menu or from another terminal.
+cat > "$APPDIR/epsxe-quit" <<'QUIT'
+#!/bin/sh
+# Ask a running ePSXe to close.
+#
+# ePSXe 2.0.5's Linux port never connects WM_DELETE_WINDOW, so the window's
+# close button does nothing. SIGTERM first (ePSXe saves its memory cards on
+# exit), SIGKILL only if it ignores that.
+_pids="$(pgrep -f 'epsxe_x64' || true)"
+if [ -z "$_pids" ]; then
+  echo "epsxe is not running" >&2
+  exit 1
+fi
+for _p in $_pids; do kill -TERM "$_p" 2>/dev/null || true; done
+sleep 2
+for _p in $(pgrep -f 'epsxe_x64' || true); do kill -KILL "$_p" 2>/dev/null || true; done
+echo "epsxe closed"
+QUIT
+chmod +x "$APPDIR/epsxe-quit"
 
 # Desktop entry + icon. appimagetool wants both in the AppDir root; they are
 # also kept in the standard usr/ locations.
