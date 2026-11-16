@@ -37,6 +37,7 @@ APPDIR="$WORK/ePSXe.AppDir"
 EPSXE_VER=2.0.5
 PLGN_VER=1.9.95
 UBUNTU_POOL="http://archive.ubuntu.com/ubuntu/pool"
+DEBIAN_POOL="http://deb.debian.org/debian/pool/main/o/openldap"
 
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib" "$APPDIR/usr/plugins" \
          "$APPDIR/usr/config" "$APPDIR/usr/share/icons/hicolor/256x256/apps" \
@@ -113,6 +114,9 @@ if [ -d "$UP_LIB" ]; then
     base="$(basename "$so")"
     case "$base" in
       libncurses.so.5*|libtinfo.so.5*|libtic.so.5*|libform.so.5*|libmenu.so.5*|libpanel.so.5*) continue ;;
+      # OpenLDAP: replaced by the Debian build, which carries the LDAP_2.4_2
+      # version script that libcurl requires.
+      libldap*|liblber*) continue ;;
       # Wayland: the upstream bundle's 18.04 libwayland-client is older than
       # the host's libwayland-cursor, which then fails on wl_proxy_marshal_flags.
       # Mixing the two breaks; take the host's consistent set instead.
@@ -130,6 +134,13 @@ if [ -d "$UP_LIB" ]; then
       libatk-1.0*|libatk-bridge*|libatspi*|libcairo*|libpango*|libharfbuzz*) continue ;;
       libfontconfig*|libfreetype*|libexpat*|libpixman*) continue ;;
       libdbus-1*|libepoxy*|libfribidi*|libthai*|libdatrie*) continue ;;
+      # X11 and the GL stack: the host provides a set that matches its own
+      # X server, its own drivers and its own libGLdispatch. Shipping a
+      # second, older copy inside the AppImage mixes two versions in one
+      # process, which breaks input (SDL/Xlib keyboard events) and rendering.
+      libX11*|libXext*|libXfixes*|libXi.*|libXrender*|libXrandr*|libXcursor*| \
+      libXinerama*|libXss*|libXxf86vm*|libXtst*|libXau*|libXdmcp*|libxcb*| \
+      libGL*|libEGL*|libgbm*|libdrm*|libOpenGL*|libglapi*) continue ;;
     esac
     cp -aL "$so" "$APPDIR/usr/lib/" 2>/dev/null || true
   done
@@ -146,6 +157,12 @@ for u in \
   fetch "$UBUNTU_POOL/$u" "$WORK/debs/$(basename "$u")"
 done
 
+# OpenLDAP from Debian rather than Ubuntu: Debian builds it with the
+# LDAP_2.4_2 version script, which is what libcurl requires (the Ubuntu
+# build has no version information, which the loader warns about).
+fetch "$DEBIAN_POOL/libldap-2.4-2_2.4.57+dfsg-3+deb11u1_amd64.deb" \
+      "$WORK/debs/libldap.deb"
+
 mkdir -p "$WORK/debex"
 for d in "$WORK"/debs/*.deb; do
   ar p "$d" data.tar.xz | tar -xJ -C "$WORK/debex"
@@ -156,13 +173,106 @@ for dir in "$WORK/debex/lib/x86_64-linux-gnu" "$WORK/debex/usr/lib/x86_64-linux-
   for so in "$dir"/libncurses.so.5* "$dir"/libtinfo.so.5* "$dir"/libtic.so.5* \
             "$dir"/libssl.so.1.0.0* "$dir"/libcrypto.so.1.0.0* \
             "$dir"/libssl.so.1.1* "$dir"/libcrypto.so.1.1* \
-            "$dir"/libunistring.so.2*; do
+            "$dir"/libunistring.so.2* \
+            "$dir"/libldap_r-2.4.so.2* "$dir"/liblber-2.4.so.2* \
+            "$dir"/libldap-2.4.so.2*; do
     [ -e "$so" ] || continue
     cp -aL "$so" "$APPDIR/usr/lib/" 2>/dev/null || true
   done
 done
 
 echo "  bundled $(find "$APPDIR/usr/lib" -type f | wc -l) libraries"
+
+# Fail the build if the emulator's libraries do not all resolve. The real
+# test is the dynamic loader's own view: run ldd with the AppImage library
+# path in front and look for anything left unresolved.
+log "Verifying that all required libraries resolve"
+if command -v ldd >/dev/null 2>&1; then
+  unresolved="$(LD_LIBRARY_PATH="$APPDIR/usr/lib" ldd "$APPDIR/usr/bin/epsxe_x64" 2>/dev/null \
+    | grep -i "not found" | awk '{print $1}' | sort -u || true)"
+  if [ -n "$unresolved" ]; then
+    echo "Error: unresolved libraries:$unresolved" >&2
+    exit 1
+  fi
+  echo "  all dependencies resolve"
+else
+  echo "  (ldd unavailable, skipping the dependency check)"
+fi
+
+# ---------------------------------------------------------------- cheats ---
+# ePSXe resolves cheats from ~/.epsxe/cheats/<GAME_CODE>.txt and downloads
+# them on demand from http://epsxe.com/cheats/<PREFIX>/<CODE>.txt. Bundling
+# the whole library makes every game playable with codes offline.
+log "Fetching the cheat library"
+mkdir -p "$APPDIR/usr/cheats"
+CHEAT_CACHE="$CACHE/cheats.tar.gz"
+if [ ! -s "$CHEAT_CACHE" ]; then
+  mkdir -p "$WORK/cheats"
+  for prefix in ESPM SCED SCES SCPS SCUS SIPS SLES SLPM SLPS SLUS; do
+    base="http://epsxe.com/cheats/$prefix"
+    names="$(curl -fsSL --max-time 60 "$base/" 2>/dev/null \
+      | grep -oE '>[A-Za-z0-9_.-]+\.txt<' | tr -d '><' | sort -u || true)"
+    [ -n "$names" ] || continue
+    mkdir -p "$WORK/cheats/$prefix"
+    printf '%s\n' "$names" | xargs -P 16 -I{} \
+      curl -fsSL --max-time 60 --retry 3 --retry-all-errors \
+        -o "$WORK/cheats/$prefix/{}" "$base/{}" || true
+  done
+  tar -czf "$CHEAT_CACHE" -C "$WORK/cheats" .
+fi
+tar -xzf "$CHEAT_CACHE" -C "$APPDIR/usr/cheats"
+echo "  bundled $(find "$APPDIR/usr/cheats" -name '*.txt' | wc -l) cheat files"
+
+# ------------------------------------------------------- extra shaders -----
+# Pete Bernert's OGL2 shader packs, in the same gpuCore.* format ePSXe's
+# internal GPU core expects (the upstream AppImage ships the vendor's
+# shaders.zip; these add the rest).
+log "Fetching additional shader packs"
+mkdir -p "$APPDIR/usr/shaders"
+for n in brightness brokenglass gray luigi_aa median_glow median multitexdemo \
+         rotate scale2x simpleblur; do
+  zip="$WORK/shader-$n.zip"
+  fetch "http://www.pbernert.com/pete_ogl2_shader_$n.zip" "$zip" || continue
+  rm -rf "$WORK/sx"; mkdir -p "$WORK/sx"
+  unzip -q -o "$zip" -d "$WORK/sx" 2>/dev/null || continue
+  slv="$(find "$WORK/sx" -name '*.slv' | head -1)"
+  slf="$(find "$WORK/sx" -name '*.slf' | head -1)"
+  [ -n "$slv" ] && [ -n "$slf" ] || continue
+  out="$APPDIR/usr/shaders/Pete-$n"
+  mkdir -p "$out"
+  cp "$slv" "$out/gpuCore.slv"
+  cp "$slf" "$out/gpuCore.slf"
+  cat > "$out/gpuCore.ini" <<EOF
+name=$n
+version=1
+license=GPLv2
+copyright=Pete Bernert
+filter_linear=0
+EOF
+done
+# The guest shader pack holds several variants at once.
+if fetch "http://www.pbernert.com/pete_ogl2_guest_shaders_v1.zip" "$WORK/guest.zip"; then
+  rm -rf "$WORK/gx"; mkdir -p "$WORK/gx"
+  unzip -q -o "$WORK/guest.zip" -d "$WORK/gx" 2>/dev/null || true
+  for d in "$WORK/gx"/*/; do
+    [ -d "$d" ] || continue
+    slv="$(find "$d" -maxdepth 1 -name '*.slv' | head -1)"
+    slf="$(find "$d" -maxdepth 1 -name '*.slf' | head -1)"
+    [ -n "$slv" ] && [ -n "$slf" ] || continue
+    name="$(basename "$d" | sed 's/ shader$//' | tr ' ' '_')"
+    out="$APPDIR/usr/shaders/Pete-$name"
+    mkdir -p "$out"
+    cp "$slv" "$out/gpuCore.slv"; cp "$slf" "$out/gpuCore.slf"
+    cat > "$out/gpuCore.ini" <<EOF
+name=$name
+version=1
+license=GPLv2
+copyright=Pete Bernert
+filter_linear=0
+EOF
+  done
+fi
+echo "  bundled $(find "$APPDIR/usr/shaders" -mindepth 1 -maxdepth 1 -type d | wc -l) shader packs"
 
 # ---------------------------------------------------------- 64-bit plugins --
 log "Building 64-bit plugins from PCSX-Reloaded ${PLGN_VER}"
@@ -265,15 +375,49 @@ cat > "$APPDIR/AppRun" <<'APPRUN'
 HERE="$(dirname "$(readlink -f "${0}")")"
 
 export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
-# ePSXe resolves plugins and configs relative to $HOME/.epsxe.
+# ePSXe resolves plugins, configs, cheats and shaders relative to $HOME/.epsxe.
 export HOME="${HOME:-/tmp}"
 
-if [ ! -d "$HOME/.epsxe/plugins" ]; then
+if [ ! -d "$HOME/.epsxe/plugins" ] || [ -L "$HOME/.epsxe/plugins" ]; then
   mkdir -p "$HOME/.epsxe"
-  ln -sfn "${HERE}/usr/plugins" "$HOME/.epsxe/plugins"
-  ln -sfn "${HERE}/usr/config"  "$HOME/.epsxe/config"
-  # ePSXe looks for shaders in ~/.epsxe/shaders.
-  [ -d "${HERE}/usr/shaders" ] && ln -sfn "${HERE}/usr/shaders" "$HOME/.epsxe/shaders"
+  # Copy rather than symlink: the AppImage is mounted in a temporary
+  # directory that disappears when it exits, so a symlink would dangle
+  # afterwards. The cheats are ~5.5k small files, so this is cheap.
+  for d in plugins config shaders cheats; do
+    [ -d "${HERE}/usr/$d" ] || continue
+    rm -rf "$HOME/.epsxe/$d"
+    cp -r "${HERE}/usr/$d" "$HOME/.epsxe/$d"
+  done
+fi
+
+# --- theming -----------------------------------------------------------
+# ePSXe 2.0.5 uses stock GTK3 widgets. Under a dark desktop theme the
+# labels of some dialogs (notably the game directory chooser) end up
+# unreadable, and there is no in-app setting for it.
+#
+# EPSXE_GTK_THEME  force a theme for ePSXe only (e.g. "Adwaita" for a
+#                  light, high-contrast rendering). Unset = use the
+#                  desktop theme.
+# EPSXE_GTK_CSS    path to a CSS file appended to ePSXe's own user.css.
+# EPSXE_GTK_DARK=1 set the theme's dark variant (only meaningful together
+#                  with EPSXE_GTK_THEME).
+if [ -n "${EPSXE_GTK_THEME:-}" ]; then
+  export GTK_THEME="$EPSXE_GTK_THEME"
+  [ "${EPSXE_GTK_DARK:-0}" = "1" ] && export GTK_THEME="$EPSXE_GTK_THEME:dark"
+fi
+
+if [ -n "${EPSXE_GTK_CSS:-}" ] && [ -f "$EPSXE_GTK_CSS" ]; then
+  # A private XDG_CONFIG_HOME keeps the override scoped to ePSXe: the
+  # desktop's own GTK settings are copied in, ours are appended.
+  _cfg="${XDG_CONFIG_HOME:-$HOME/.config}"
+  _priv="$(mktemp -d)"
+  mkdir -p "$_priv/gtk-3.0"
+  for _f in settings.ini user.css gtk.css; do
+    [ -f "$_cfg/gtk-3.0/$_f" ] && cp "$_cfg/gtk-3.0/$_f" "$_priv/gtk-3.0/" || true
+  done
+  cat "$EPSXE_GTK_CSS" >> "$_priv/gtk-3.0/user.css" 2>/dev/null || \
+    cp "$EPSXE_GTK_CSS" "$_priv/gtk-3.0/user.css"
+  export XDG_CONFIG_HOME="$_priv"
 fi
 
 exec "${HERE}/usr/bin/epsxe_x64" "$@"
