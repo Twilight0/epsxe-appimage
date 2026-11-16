@@ -281,6 +281,16 @@ git clone -q --depth 1 --branch "$PLGN_VER" \
   https://github.com/frealgagu/PCSX-Reloaded.git "$WORK/pcsxr"
 cd "$WORK/pcsxr/pcsxr"
 
+# ePSXe compatibility patches from the Arch AUR 'epsxe' package.
+#
+# 1. texture.c contains "*ta++=*(ta-(g_x2-g_x1));", which is undefined
+#    behaviour (two unsequenced accesses to ta) and corrupts memory.
+# 2. the config GUI path has to point at ePSXe's ~/.epsxe, not ~/.pcsxr.
+curl -fsSL --max-time 30 -o "$WORK/undefined-ops.patch" \
+  "https://aur.archlinux.org/cgit/aur.git/plain/pcsxr-fix-undefined-operations.patch?h=epsxe"
+(cd "$WORK/pcsxr" && patch -Np1 -i "$WORK/undefined-ops.patch") || \
+  echo "warning: undefined-operations patch did not apply"
+
 # Build only the Linux-relevant plugins. dfxvideo is a DirectX plugin and
 # bladesio1 is the Windows SIO1 interface: neither is usable here, and both
 # fail to compile against a modern toolchain.
@@ -316,6 +326,9 @@ sed -ri 's|\*disp=\(unsigned long \*\)display;|*disp=(unsigned long)display;|' p
 sed -i 's|^int OpenCdHandle();|int OpenCdHandle(const char *dev);|' plugins/dfcdrom/cdr.h
 # ePSXe looks in ~/.epsxe, PCSX-Reloaded in ~/.pcsxr.
 sed -i 's|\.pcsxr|.epsxe|g' gui/Linux.h
+# The plugin's config GUI path: ~/.epsxe/plugins/cfgpeopsxgl
+sed -i 's|%s/\.epsxe/plugins/cfg/cfgpeopsxgl|%s/.epsxe/plugins/cfgpeopsxgl|' \
+  plugins/peopsxgl/gpu.c
 sed -i 's|/games/psemu/||g' plugins/peopsxgl/Makefile.am
 sed -i 's|/psemu/||g' plugins/peopsxgl/Makefile.am
 # The plugin config GUI lives next to the plugin itself.
@@ -482,6 +495,12 @@ fi
 # config at the bundled ones. Names are taken from the files present, so
 # this survives a rebuild.
 #
+# The input plugin is deliberately NOT selected: libDFInput.so calls
+# XInternAtom() on the X display ePSXe hands it, and ePSXe 2.0.5 renders
+# through SDL 1.2 and passes none - the plugin segfaults in InitKeyboard().
+# The internal input core works and still forwards keys to the GPU plugin,
+# which is what the ESC menu needs.
+#
 # epsxerc only exists after ePSXe has run once, so this runs on every start
 # and rewrites the config each time (it is idempotent).
 _select_plugins() {
@@ -489,9 +508,7 @@ _select_plugins() {
   _rc="$HOME/.epsxe/epsxerc"
   for _pair in \
     "VideoPlugin:libpeopsxgl.so" \
-    "SoundPlugin:libDFSound.so" \
-    "InputPlugin:libDFInput.so" \
-    "Input2Plugin:libDFInput.so" ; do
+    "SoundPlugin:libDFSound.so" ; do
     _key="${_pair%%:*}"
     _val="${_pair#*:}"
     [ -f "$HOME/.epsxe/plugins/$_val" ] || continue
@@ -502,6 +519,13 @@ _select_plugins() {
         printf '%s = %s\n' "$_key" "$_val" >> "$_rc"
       fi
       echo "epsxe: using the bundled plugin $_val"
+    fi
+  done
+  # Never leave the crashing input plugin selected.
+  for _key in InputPlugin Input2Plugin; do
+    if grep -q "^$_key = libDFInput" "$_rc"; then
+      sed -i "s|^$_key = .*|$_key = INPUTCORE|" "$_rc"
+      echo "epsxe: reverted $_key to the internal core"
     fi
   done
 }
