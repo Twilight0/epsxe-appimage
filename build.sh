@@ -369,6 +369,32 @@ ls -1 "$APPDIR/usr/plugins" 2>/dev/null || echo "  (none)"
 
 # --------------------------------------------------------------- AppRun ----
 log "Writing AppRun"
+mkdir -p "$APPDIR/usr/share/epsxe"
+cat > "$APPDIR/usr/share/epsxe/config.example" <<'CFG'
+# ePSXe settings.
+#
+# Copy to /etc/epsxe.conf (system wide) or ~/.config/epsxe/config (per user)
+# to have the settings apply to desktop menu launches as well.
+#
+# One KEY=VALUE per line.
+
+# Force a theme for ePSXe only. ePSXe 2.0.5 uses stock GTK3 widgets, and
+# under a dark desktop theme some labels (e.g. in the game directory
+# chooser) are hard to read. "Adwaita" renders them light and readable.
+#EPSXE_GTK_THEME=Adwaita
+
+# Use the dark variant of the forced theme.
+#EPSXE_GTK_DARK=1
+
+# Extra CSS applied to ePSXe only.
+#EPSXE_GTK_CSS=$HOME/.config/epsxe/epsxe.css
+
+# SDL2 backend. Needed on Wayland: ePSXe draws through X11/GLX while the
+# input plugin reads the keyboard through SDL2, so SDL2 must use the X11
+# backend too or no key reaches the emulator.
+#SDL_VIDEODRIVER=x11
+CFG
+
 cat > "$APPDIR/AppRun" <<'APPRUN'
 #!/bin/bash
 # ePSXe AppImage launcher.
@@ -377,6 +403,38 @@ HERE="$(dirname "$(readlink -f "${0}")")"
 export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
 # ePSXe resolves plugins, configs, cheats and shaders relative to $HOME/.epsxe.
 export HOME="${HOME:-/tmp}"
+
+# --- configuration -----------------------------------------------------
+# Persistent settings, so the fixes also apply when ePSXe is started from
+# the desktop menu (a menu launch does not inherit the shell environment).
+#
+#   system wide : /etc/epsxe.conf
+#   per user    : ~/.config/epsxe/config
+#
+# Format: one KEY=VALUE per line, shell syntax. The user file wins.
+#
+#   EPSXE_GTK_THEME=Adwaita        force a theme for ePSXe only
+#   EPSXE_GTK_DARK=1               use the dark variant of a forced theme
+#   EPSXE_GTK_CSS=/path/to.css     extra CSS for ePSXe only
+#   SDL_VIDEODRIVER=x11            SDL2 backend (needed on Wayland)
+for _cfgfile in /etc/epsxe.conf "$HOME/.config/epsxe/config"; do
+  [ -r "$_cfgfile" ] || continue
+  # shellcheck disable=SC1090
+  . "$_cfgfile"
+done
+
+# --- input on Wayland --------------------------------------------------
+# ePSXe opens its window through X11/GLX, but the input plugin (dfinput)
+# reads the keyboard through SDL2. Under a Wayland session SDL2 defaults to
+# its Wayland backend and creates a separate surface, so it never receives
+# the key events of the X11 window the emulator actually draws in: ESC and
+# every other key end up in limbo.
+#
+# Pointing SDL2 at the X11 backend puts input and rendering on the same
+# X connection (XWayland), which restores the keyboard.
+if [ -z "${SDL_VIDEODRIVER:-}" ] && [ -n "${DISPLAY:-}" ]; then
+  export SDL_VIDEODRIVER=x11
+fi
 
 if [ ! -d "$HOME/.epsxe/plugins" ] || [ -L "$HOME/.epsxe/plugins" ]; then
   mkdir -p "$HOME/.epsxe"
@@ -420,6 +478,27 @@ if [ -n "${EPSXE_GTK_CSS:-}" ] && [ -f "$EPSXE_GTK_CSS" ]; then
   export XDG_CONFIG_HOME="$_priv"
 fi
 
+# --- quitting ----------------------------------------------------------
+# ePSXe 2.0.5's Linux port never connects WM_DELETE_WINDOW, so the window's
+# close button is ignored. SIGTERM would also kill it mid-write of a
+# memory card, so the quit helper asks politely first and only forces the
+# issue if the emulator ignores the request.
+case "${1:-}" in
+  --quit)
+    shift
+    _pids="$(pgrep -f 'epsxe_x64' || true)"
+    if [ -z "$_pids" ]; then
+      echo "epsxe is not running" >&2
+      exit 1
+    fi
+    for _p in $_pids; do kill -TERM "$_p" 2>/dev/null || true; done
+    sleep 2
+    for _p in $(pgrep -f 'epsxe_x64' || true); do kill -KILL "$_p" 2>/dev/null || true; done
+    echo "epsxe closed"
+    exit 0
+    ;;
+esac
+
 exec "${HERE}/usr/bin/epsxe_x64" "$@"
 APPRUN
 chmod +x "$APPDIR/AppRun"
@@ -432,7 +511,7 @@ Type=Application
 Name=ePSXe PS1 Emulator
 Comment=A PlayStation 1 emulator for 64-bit Linux
 Icon=epsxe
-Exec=epsxe
+Exec=epsxe %U
 Terminal=false
 Categories=Game;Emulator;
 Keywords=PS1;PSX;ePSXe;PlayStation 1;
