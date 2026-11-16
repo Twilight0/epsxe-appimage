@@ -118,6 +118,18 @@ if [ -d "$UP_LIB" ]; then
       # Mixing the two breaks; take the host's consistent set instead.
       libwayland-*) continue ;;
       libxkbcommon.so.0) continue ;;
+      # Libraries that load external modules from an absolute path baked in at
+      # build time. The bundled Ubuntu copies look for Ubuntu paths
+      # (/usr/lib/x86_64-linux-gnu/alsa-lib, .../gdk-pixbuf-2.0/2.10.0,
+      # .../gio/modules) which do not exist on Arch, so ALSA and the pixbuf
+      # loaders silently fail. Let the host provide them.
+      libasound.so*) continue ;;
+      libgdk_pixbuf*) continue ;;
+      libgio-2.0*|libgobject-2.0*|libgmodule-2.0*|libglib-2.0*|libgthread-2.0*) continue ;;
+      libgtk-3*|libgdk-3*|libgdk-x11*|libgdk_pixbuf*) continue ;;
+      libatk-1.0*|libatk-bridge*|libatspi*|libcairo*|libpango*|libharfbuzz*) continue ;;
+      libfontconfig*|libfreetype*|libexpat*|libpixman*) continue ;;
+      libdbus-1*|libepoxy*|libfribidi*|libthai*|libdatrie*) continue ;;
     esac
     cp -aL "$so" "$APPDIR/usr/lib/" 2>/dev/null || true
   done
