@@ -1,0 +1,4 @@
+out/
+*.AppImage
+build/
+.DS_Store
