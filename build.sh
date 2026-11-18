@@ -723,6 +723,27 @@ esac
 # the internal cores, and the next run picks up the bundled plugins.
 _select_plugins
 
+# --- plugin config GUI layout ------------------------------------------
+# Each plugin execs its config program with a path relative to the working
+# directory, which is ~/.epsxe, but the paths differ per plugin:
+#
+#   dfinput  execl("cfg/cfgDFInput", ...)
+#   dfnet    execl("cfg/cfgDFNet", ...)
+#   dfsound  execl("./cfgDFSound", ...)
+#   dfcdrom  execl("./cfgDFCdrom", ...)
+#   peopsxgl  %s/.epsxe/plugins/cfgpeopsxgl   (absolute, works as shipped)
+#
+# The programs are installed in plugins/, so the relative ones fail to
+# exec and the dialog silently never appears. Provide the layout they
+# expect with links, leaving the binaries in one place.
+if [ -d "$HOME/.epsxe/plugins" ]; then
+  [ -e "$HOME/.epsxe/cfg" ] || ln -sfn plugins "$HOME/.epsxe/cfg" 2>/dev/null || true
+  for _g in cfgDFSound cfgDFCdrom cfgDFInput cfgDFNet cfgpeopsxgl; do
+    [ -f "$HOME/.epsxe/plugins/$_g" ] || continue
+    [ -e "$HOME/.epsxe/$_g" ] || ln -sfn "plugins/$_g" "$HOME/.epsxe/$_g" 2>/dev/null || true
+  done
+fi
+
 exec "${HERE}/usr/bin/epsxe_x64" "$@"
 APPRUN
 chmod +x "$APPDIR/AppRun"
