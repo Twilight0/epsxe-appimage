@@ -326,14 +326,14 @@ sed -ri 's|\*disp=\(unsigned long \*\)display;|*disp=(unsigned long)display;|' p
 sed -i 's|^int OpenCdHandle();|int OpenCdHandle(const char *dev);|' plugins/dfcdrom/cdr.h
 # ePSXe looks in ~/.epsxe, PCSX-Reloaded in ~/.pcsxr.
 sed -i 's|\.pcsxr|.epsxe|g' gui/Linux.h
-# The plugin's config GUI path: ~/.epsxe/plugins/cfgpeopsxgl
-sed -i 's|%s/\.epsxe/plugins/cfg/cfgpeopsxgl|%s/.epsxe/plugins/cfgpeopsxgl|' \
+# The plugin's config GUI lives next to the plugin itself. The source path is
+# "%s/.pcsxr/plugins/cfg/cfgpeopsxgl" and the plugin only falls back to
+# PATH-relative lookup, so it must be rewritten or ePSXe reports
+# "ERROR: cfgpeopsxgl file not found!".
+sed -i 's|%s/\.pcsxr/plugins/cfg/cfgpeopsxgl|%s/.epsxe/plugins/cfgpeopsxgl|' \
   plugins/peopsxgl/gpu.c
 sed -i 's|/games/psemu/||g' plugins/peopsxgl/Makefile.am
 sed -i 's|/psemu/||g' plugins/peopsxgl/Makefile.am
-# The plugin config GUI lives next to the plugin itself.
-sed -i 's|%s/\.epsxe/plugins/cfg/cfgpeopsxgl|%s/.epsxe/plugins/cfgpeopsxgl|' \
-  plugins/peopsxgl/gpu.c
 
 export CC=gcc CXX=g++
 export CFLAGS="-fcommon -O2 -Wno-error"
