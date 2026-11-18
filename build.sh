@@ -528,6 +528,22 @@ if [ "$_needs_seed" = "1" ]; then
   echo "epsxe: done."
 fi
 
+# Refresh individual bundled files that are out of date, without touching
+# anything else: the plugins directory also holds the settings files the
+# plugin writes (.cfg), and those must survive an upgrade.
+for d in plugins config; do
+  [ -d "${HERE}/usr/$d" ] || continue
+  (cd "${HERE}/usr/$d" && find . -type f | while IFS= read -r _f; do
+    _src="${HERE}/usr/$d/$_f"
+    _dst="$HOME/.epsxe/$d/$_f"
+    if [ ! -f "$_dst" ] || ! cmp -s "$_src" "$_dst"; then
+      mkdir -p "$(dirname "$_dst")"
+      cp -p "$_src" "$_dst" 2>/dev/null && \
+        echo "epsxe: refreshed $d/${_f#./}"
+    fi
+  done)
+done
+
 # Make the settings file discoverable: drop a documented example next to
 # ePSXe's own data, but never overwrite one the user has edited.
 if [ ! -e "$HOME/.epsxe/epsxe.conf" ] && [ -f "${HERE}/usr/share/epsxe/config.example" ]; then
