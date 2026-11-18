@@ -397,6 +397,45 @@ echo
 echo "Plugins built:"
 ls -1 "$APPDIR/usr/plugins" 2>/dev/null || echo "  (none)"
 
+# The config GUIs embed DATADIR as an ABSOLUTE path to this build directory
+# (/tmp/tmp.XXXX/ePSXe.AppDir/usr/config/), which can never exist at runtime:
+# an AppImage mounts at a random /tmp/.mount_XXXXX. Rewrite it to a relative
+# path, so it resolves against ePSXe's working directory (~/.epsxe), where
+# the .ui files are deployed. The replacement is shorter, so pad with NULs.
+log "Making the config GUI paths relocatable"
+python3 - "$APPDIR/usr/plugins" <<'PY'
+import os, sys, glob
+
+plugdir = sys.argv[1]
+MARK = b"/ePSXe.AppDir/usr/config/"
+REPL = b"config/"
+
+for path in glob.glob(os.path.join(plugdir, "cfg*")):
+    if not os.path.isfile(path) or os.path.islink(path):
+        continue
+    data = bytearray(open(path, "rb").read())
+    changed = 0
+    idx = data.find(MARK)
+    while idx != -1:
+        # Walk back to the start of the NUL-terminated string.
+        start = idx
+        while start > 0 and data[start - 1] != 0:
+            start -= 1
+        end = data.find(b"\x00", idx)
+        if end == -1:
+            break
+        old = bytes(data[start:end])
+        tail = old[idx - start + len(MARK):]
+        new = REPL + tail
+        if len(new) <= len(old):
+            data[start:end] = new + b"\x00" * (len(old) - len(new))
+            changed += 1
+        idx = data.find(MARK, start + 1)
+    if changed:
+        open(path, "wb").write(bytes(data))
+        print(f"  rewrote {os.path.basename(path)} ({changed} path)")
+PY
+
 # --------------------------------------------------------------- AppRun ----
 log "Writing AppRun"
 mkdir -p "$APPDIR/usr/share/epsxe"
