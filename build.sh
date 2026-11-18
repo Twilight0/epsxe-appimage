@@ -388,8 +388,11 @@ cp "$SCRIPT_DIR/epsxe.css" "$APPDIR/usr/share/epsxe/epsxe.css"
 cat > "$APPDIR/usr/share/epsxe/config.example" <<'CFG'
 # ePSXe settings.
 #
-# Copy to /etc/epsxe.conf (system wide) or ~/.config/epsxe/config (per user)
-# to have the settings apply to desktop menu launches as well.
+# Copy to /etc/epsxe.conf (system wide) or ~/.epsxe/epsxe.conf (per user) to
+# have the settings apply to desktop menu launches as well.
+#
+# Everything lives under ~/.epsxe/, where ePSXe keeps its own data, so there
+# is a single configuration location.
 #
 # One KEY=VALUE per line.
 
@@ -401,8 +404,9 @@ cat > "$APPDIR/usr/share/epsxe/config.example" <<'CFG'
 # Use the dark variant of the forced theme.
 #EPSXE_GTK_DARK=1
 
-# Extra CSS applied to ePSXe only.
-#EPSXE_GTK_CSS=$HOME/.config/epsxe/epsxe.css
+# Extra CSS applied to ePSXe only. Put it in ~/.epsxe/epsxe.css to replace
+# the bundled stylesheet.
+#EPSXE_GTK_CSS=$HOME/.epsxe/epsxe.css
 
 # SDL2 backend. Needed on Wayland: ePSXe draws through X11/GLX while the
 # input plugin reads the keyboard through SDL2, so SDL2 must use the X11
@@ -419,12 +423,50 @@ export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
 # ePSXe resolves plugins, configs, cheats and shaders relative to $HOME/.epsxe.
 export HOME="${HOME:-/tmp}"
 
+# --- single configuration location -------------------------------------
+# ePSXe hardcodes $HOME/.epsxe/ (it reads no other environment variable, so
+# the path cannot be overridden), but everything it stores there is user
+# configuration and data. Keep one location by making ~/.epsxe a symlink to
+# ~/.config/epsxe, the conventional place for user configuration.
+#
+# The migration runs once: an existing ~/.epsxe directory is moved into
+# ~/.config/epsxe, and only when that target does not already exist. Both
+# present means the user arranged it deliberately, so it is left alone.
+if [ ! -L "$HOME/.epsxe" ]; then
+  if [ ! -e "$HOME/.epsxe" ]; then
+    mkdir -p "$HOME/.config/epsxe"
+    ln -s ".config/epsxe" "$HOME/.epsxe" 2>/dev/null || true
+  elif [ ! -e "$HOME/.config/epsxe" ]; then
+    echo "epsxe: moving ~/.epsxe to ~/.config/epsxe (single config location)"
+    mkdir -p "$HOME/.config"
+    _n_before=$(find "$HOME/.epsxe" -type f 2>/dev/null | wc -l)
+    if cp -a "$HOME/.epsxe" "$HOME/.config/epsxe" 2>/dev/null; then
+      _n_after=$(find "$HOME/.config/epsxe" -type f 2>/dev/null | wc -l)
+      if [ "$_n_after" -lt "$_n_before" ]; then
+        echo "epsxe: copy incomplete ($_n_after of $_n_before files), keeping ~/.epsxe" >&2
+        rm -rf "$HOME/.config/epsxe" 2>/dev/null || true
+      else
+        rm -rf "$HOME/.epsxe"
+        ln -s ".config/epsxe" "$HOME/.epsxe" 2>/dev/null || true
+        echo "epsxe: done ($_n_after files). ~/.epsxe is now a symlink to ~/.config/epsxe"
+      fi
+    else
+      echo "epsxe: could not migrate, keeping ~/.epsxe as a directory" >&2
+      rm -rf "$HOME/.config/epsxe" 2>/dev/null || true
+    fi
+  fi
+fi
+
 # --- configuration -----------------------------------------------------
 # Persistent settings, so the fixes also apply when ePSXe is started from
 # the desktop menu (a menu launch does not inherit the shell environment).
 #
 #   system wide : /etc/epsxe.conf
-#   per user    : ~/.config/epsxe/config
+#   per user    : ~/.epsxe/epsxe.conf
+#
+# Everything lives under ~/.epsxe/, which is where ePSXe keeps its own data
+# (it hardcodes $HOME/.epsxe/ and reads no other environment variable), so
+# there is a single configuration location instead of two conventions.
 #
 # Format: one KEY=VALUE per line, shell syntax. The user file wins.
 #
@@ -432,7 +474,7 @@ export HOME="${HOME:-/tmp}"
 #   EPSXE_GTK_DARK=1               use the dark variant of a forced theme
 #   EPSXE_GTK_CSS=/path/to.css     extra CSS for ePSXe only
 #   SDL_VIDEODRIVER=x11            SDL2 backend (needed on Wayland)
-for _cfgfile in /etc/epsxe.conf "$HOME/.config/epsxe/config"; do
+for _cfgfile in /etc/epsxe.conf "$HOME/.epsxe/epsxe.conf"; do
   [ -r "$_cfgfile" ] || continue
   # shellcheck disable=SC1090
   . "$_cfgfile"
@@ -484,6 +526,13 @@ if [ "$_needs_seed" = "1" ]; then
     cp -r "${HERE}/usr/$d" "$HOME/.epsxe/$d"
   done
   echo "epsxe: done."
+fi
+
+# Make the settings file discoverable: drop a documented example next to
+# ePSXe's own data, but never overwrite one the user has edited.
+if [ ! -e "$HOME/.epsxe/epsxe.conf" ] && [ -f "${HERE}/usr/share/epsxe/config.example" ]; then
+  mkdir -p "$HOME/.epsxe"
+  cp "${HERE}/usr/share/epsxe/config.example" "$HOME/.epsxe/epsxe.conf.example"
 fi
 
 # --- select the bundled plugins -----------------------------------------
@@ -550,6 +599,9 @@ if [ -n "${EPSXE_GTK_CSS:-}" ] && [ -f "$EPSXE_GTK_CSS" ]; then
   _css="$EPSXE_GTK_CSS"
 elif [ "${EPSXE_GTK_CSS:-}" = "none" ]; then
   _css=""
+elif [ -f "$HOME/.epsxe/epsxe.css" ]; then
+  # A user stylesheet in the ePSXe data directory replaces ours.
+  _css="$HOME/.epsxe/epsxe.css"
 else
   # Our own readability fixes, applied on top of the desktop's user.css.
   _css="${HERE}/usr/share/epsxe/epsxe.css"
