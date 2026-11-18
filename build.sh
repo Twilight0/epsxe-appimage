@@ -222,6 +222,12 @@ if [ ! -s "$CHEAT_CACHE" ]; then
   tar -czf "$CHEAT_CACHE" -C "$WORK/cheats" .
 fi
 tar -xzf "$CHEAT_CACHE" -C "$APPDIR/usr/cheats"
+# ePSXe looks cheats up as $HOME/.epsxe/cheats/<GAME_CODE>.txt - one flat
+# file per game (the parser is the "%s/.epsxe/%s%s.txt" + "#%[^\n]s" pair in
+# the binary). The vendor mirrors them in per-region directories, so flatten
+# them or the cheat list stays empty.
+find "$APPDIR/usr/cheats" -mindepth 2 -name '*.txt' -exec mv -f {} "$APPDIR/usr/cheats/" \; 2>/dev/null || true
+find "$APPDIR/usr/cheats" -mindepth 1 -type d -empty -delete 2>/dev/null || true
 echo "  bundled $(find "$APPDIR/usr/cheats" -name '*.txt' | wc -l) cheat files"
 
 # ------------------------------------------------------- extra shaders -----
@@ -332,8 +338,16 @@ sed -i 's|\.pcsxr|.epsxe|g' gui/Linux.h
 # "ERROR: cfgpeopsxgl file not found!".
 sed -i 's|%s/\.pcsxr/plugins/cfg/cfgpeopsxgl|%s/.epsxe/plugins/cfgpeopsxgl|' \
   plugins/peopsxgl/gpu.c
-sed -i 's|/games/psemu/||g' plugins/peopsxgl/Makefile.am
-sed -i 's|/psemu/||g' plugins/peopsxgl/Makefile.am
+# The plugin resolves its .ui through DATADIR, defined as "${datadir}/psemu/"
+# and concatenated directly with the file name, so the trailing slash is
+# load-bearing. Drop only the psemu/ segment, never the slash. Every plugin
+# has its own Makefile.am with the same definition.
+for _mk in plugins/peopsxgl/Makefile.am plugins/dfinput/Makefile.am \
+           plugins/dfsound/Makefile.am plugins/dfcdrom/Makefile.am \
+           plugins/dfnet/Makefile.am ; do
+  [ -f "$_mk" ] || continue
+  sed -i 's|/games/psemu/|/|g; s|/psemu/|/|g' "$_mk"
+done
 
 export CC=gcc CXX=g++
 export CFLAGS="-fcommon -O2 -Wno-error"
@@ -368,10 +382,12 @@ for pdir in "$WORK/pcsxr/pcsxr/plugins"/*/; do
     case "$cfg" in *.c|*.h|*.la|*.o) continue ;; esac
     cp -a "$cfg" "$APPDIR/usr/plugins/"
   done
-  # .ui definitions used by the config GUIs.
-  if [ -d "$pdir/gpucfg" ]; then
-    cp -a "$pdir/gpucfg/." "$APPDIR/usr/config/" 2>/dev/null || true
-  fi
+  # .ui definitions used by the config GUIs. Each plugin keeps its own in a
+# differently named subdirectory (gpucfg, spucfg-0.1df, gpucfg-0.1df, ...),
+# and the GUI looks them up as DATADIR "<name>.ui", so they all belong in
+# usr/config.
+  find "$pdir" -maxdepth 2 -name '*.ui' -not -path '*..svnbridge*' \
+    -exec cp -a {} "$APPDIR/usr/config/" \; 2>/dev/null || true
 done
 find "$APPDIR/usr/plugins" -name '*.la' -delete
 find "$APPDIR/usr/plugins" -type d -empty -delete
