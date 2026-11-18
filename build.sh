@@ -297,6 +297,39 @@ curl -fsSL --max-time 30 -o "$WORK/undefined-ops.patch" \
 (cd "$WORK/pcsxr" && patch -Np1 -i "$WORK/undefined-ops.patch") || \
   echo "warning: undefined-operations patch did not apply"
 
+# The config tools are started with fork() + execl(), and the intermediate
+# child then calls exit(0). exit() runs atexit handlers inherited from ePSXe;
+# those close the SHARED X display, so the parent receives GDK_DESTROY for its
+# main window, runs on_window_main_destroy -> emu_mesg_exit, and quits.
+# _exit() skips atexit handlers, leaving the parent's connection intact.
+(cd "$WORK/pcsxr" && python3 - <<'PY'
+import glob, re
+for path in glob.glob("pcsxr/plugins/*/*.c"):
+    src = open(path).read()
+    # Only replace exit(0) in the intermediate child: the statement that
+    # immediately follows an inner `if (fork()==0) { execl(...); }` block.
+    pat = re.compile(r'(if\s*\(\s*fork\(\)\s*==\s*0\s*\)\s*\{\s*execl\([^;]*;\s*\}\s*\n\s*)exit\(0\)')
+    new, n = pat.subn(r'\1_exit(0)', src)
+    # netplay uses: if ((cfgpid = fork()) == 0) { execl(...); exit(0); }
+    pat2 = re.compile(r'(if\s*\(\s*\(\s*\w+\s*=\s*fork\(\)\)\s*==\s*0\s*\)\s*\{\s*execl\([^;]*;\s*\n\s*)exit\(0\)')
+    new, n2 = pat2.subn(r'\1_exit(0)', new)
+    n += n2
+    # the other netplay launcher uses system(cfg) rather than execl
+    src2 = new.replace('{ system(cfg); exit(0); }', '{ system(cfg); _exit(0); }')
+    if src2 != new:
+        new = src2; n += 1
+    if n:
+        if '#include <unistd.h>' not in new:
+            lines = new.splitlines(True)
+            # insert after the last leading #include block
+            last = max(i for i, l in enumerate(lines) if l.startswith('#include'))
+            lines.insert(last + 1, '#include <unistd.h>\n')
+            new = ''.join(lines)
+        open(path, "w").write(new)
+        print("patched", path, n)
+PY
+)
+
 # Build only the Linux-relevant plugins. dfxvideo is a DirectX plugin and
 # bladesio1 is the Windows SIO1 interface: neither is usable here, and both
 # fail to compile against a modern toolchain.
