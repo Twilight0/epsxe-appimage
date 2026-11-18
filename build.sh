@@ -467,6 +467,12 @@ cat > "$APPDIR/usr/share/epsxe/config.example" <<'CFG'
 # input plugin reads the keyboard through SDL2, so SDL2 must use the X11
 # backend too or no key reaches the emulator.
 #SDL_VIDEODRIVER=x11
+
+# GTK backend. Kept on X11 for the same reason: the GUI is a Wayland client
+# while the renderer is an X11 one, and the plugin config tools fork, which
+# makes a Wayland connection in the parent die (ePSXe then exits when the
+# audio configuration is opened).
+#GDK_BACKEND=x11
 CFG
 
 cat > "$APPDIR/AppRun" <<'APPRUN'
@@ -546,6 +552,16 @@ done
 # X connection (XWayland), which restores the keyboard.
 if [ -z "${SDL_VIDEODRIVER:-}" ] && [ -n "${DISPLAY:-}" ]; then
   export SDL_VIDEODRIVER=x11
+fi
+
+# Same reason for the GUI: ePSXe's GTK window is a Wayland client while the
+# emulator renders through X11/XWayland. The plugin config tools are started
+# with fork()+execl, and a forked child tearing down its inherited Wayland
+# connection makes the parent's GTK main loop return - which is why opening
+# the audio configuration ends ePSXe with a clean "Going out from gui".
+# Putting GTK on X11 as well keeps the whole process on one display server.
+if [ -z "${GDK_BACKEND:-}" ] && [ -n "${DISPLAY:-}" ]; then
+  export GDK_BACKEND=x11
 fi
 
 # --- ~/.epsxe seeding --------------------------------------------------
